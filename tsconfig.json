@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "module": "es2022",
+    "noImplicitAny": true,
+    "removeComments": true,
+    "preserveConstEnums": true,
+    "sourceMap": true,
+    "lib": [
+      "DOM",
+      "ES2024",
+      "ESNext"
+
+    ],
+    "allowSyntheticDefaultImports": true,
+    "declaration": true,
+    "moduleResolution": "node",
+    "target": "es2024",
+    "outDir": "out",
+    "plugins": [
+      {
+        "transform": "typia/lib/transform"
+      }
+    ],
+    "skipLibCheck": true,
+    "strictNullChecks": true,
+    "strict": true,
+    "inlineSources": true
+  },
+  "include": [
+    "DataShapes.ts",
+    "index.ts"
+  ]
+}

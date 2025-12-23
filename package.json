@@ -1,0 +1,28 @@
+{
+  "name": "datashapesextracted",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "run": "npm run build && node --enable-source-maps ./out/index.js",
+    "build": "tsc",
+    "prepare": "ts-patch install"
+  },
+  "dependencies": {
+    "@triply/yasgui": "^4.2.28",
+    "@types/underscore": "^1.13.0",
+    "mongodb": "7.0",
+    "typia": "^10.1.0",
+    "underscore": "^1.13.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "ts-auto-guard": "^5.0.1",
+    "ts-patch": "^3.3.0",
+    "typescript": "~5.9.3"
+  }
+}
