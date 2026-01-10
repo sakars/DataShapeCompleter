@@ -194,15 +194,115 @@ export class DataShapesClient {
 
     public trace_log: boolean = false;
 
+    public simultaneous_requests_limit: number = 1;
+
+    private ongoing_requests: number = 0;
+
+    private peak_ongoing_requests: number = 0;
+
+    private total_requests_made: number = 0;
+
+    private total_request_time_ms: number = 0;
+
+    private request_times: number[] = [];
+
+    private wait_queue: [() => void, () => void][] = [];
+
     constructor(baseUrl: string) {
         this.baseUrl = baseUrl;
         this.ontologiesCache = null;
         this.propertyMapCache = new Map();
     }
 
+    get currentOngoingRequests(): number {
+        return this.ongoing_requests;
+    }
+
+    get peakOngoingRequests(): number {
+        return this.peak_ongoing_requests;
+    }
+
+    get totalRequestsMade(): number {
+        return this.total_requests_made;
+    }
+
+    get averageRequestTimeMs(): number {
+        if (this.total_requests_made === 0) {
+            return 0;
+        }
+        return this.total_request_time_ms / this.total_requests_made;
+    }
+
+    get medianRequestTimeMs(): number {
+        if (this.request_times.length === 0) {
+            return 0;
+        }
+        const sorted = [...this.request_times].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        if (sorted.length % 2 === 0) {
+            return (sorted[mid - 1] + sorted[mid]) / 2;
+        } else {
+            return sorted[mid];
+        }
+    }
+
     invalidateCache() {
         this.ontologiesCache = null;
         this.propertyMapCache = new Map();
+        this.peak_ongoing_requests = 0;
+        this.total_requests_made = 0;
+        this.total_request_time_ms = 0;
+        this.request_times = [];
+        for (const resolver of this.wait_queue) {
+            resolver[1](); // call reject
+        }
+        this.wait_queue = [];
+    }
+
+    private async acquireRequestSlot() {
+        // while (this.ongoing_requests >= this.simultaneous_requests_limit) {
+        //     await new Promise(resolve => setTimeout(resolve, 50));
+        // }
+        // this.ongoing_requests += 1;
+        // if (this.ongoing_requests > this.peak_ongoing_requests) {
+        //     this.peak_ongoing_requests = this.ongoing_requests;
+        // }
+        // this.total_requests_made += 1;
+        // return {
+        //     acquired_timestamp: Date.now(),
+        // }
+        if (this.ongoing_requests < this.simultaneous_requests_limit) {
+            this.ongoing_requests += 1;
+            return {
+                acquired_timestamp: Date.now(),
+
+            };
+        }
+        return await new Promise<{ acquired_timestamp: number }>((resolve, reject) => {
+            this.wait_queue.push([
+                () => {
+                    this.ongoing_requests += 1;
+                    resolve({ acquired_timestamp: Date.now() });
+                },
+                () => {
+                    reject(new Error("Request slot acquisition aborted"));
+                }
+            ]);
+        });
+    }
+
+    private releaseRequestSlot(lock_data: { acquired_timestamp: number }) {
+        // console.log(`Request completed in ${Date.now() - lock_data.acquired_timestamp} ms`);
+        // this.ongoing_requests -= 1;
+        const request_time = Date.now() - lock_data.acquired_timestamp;
+        console.log(`Request completed in ${request_time} ms`);
+        this.total_request_time_ms += request_time;
+        this.request_times.push(request_time);
+        this.ongoing_requests -= 1;
+        if (this.wait_queue.length > 0) {
+            const next = this.wait_queue.shift()!;
+            next[0](); // call resolve
+        }
     }
 
     async fetchOntologies(abort_signal?: AbortSignal): Promise<OntologyInfo[]> {
@@ -213,18 +313,28 @@ export class DataShapesClient {
         if (this.trace_log) {
             console.log(`Fetching ontologies from ${this.baseUrl}/info`);
         }
-        // Will throw on abort
-        const api_info = await fetch(`${this.baseUrl}/info`, { signal: abort_signal });
-
-
-        const api_info_data = await api_info.json();
-        if (this.trace_log) {
-            console.log(`Fetched ontologies: ${JSON.stringify(api_info_data, null, 2)}`);
+        while (this.ongoing_requests >= this.simultaneous_requests_limit) {
+            await new Promise(resolve => setTimeout(resolve, 50));
         }
+        const lock_data = await this.acquireRequestSlot();
+        try {
+            // Will throw on abort
+            const api_info = await fetch(`${this.baseUrl}/info`, { signal: abort_signal });
+            const api_info_data = await api_info.json();
+            if (this.trace_log) {
+                console.log(`Fetched ontologies: ${JSON.stringify(api_info_data, null, 2)}`);
+            }
 
-        typia.assertEquals<OntologyInfo[]>(api_info_data);
-        this.ontologiesCache = api_info_data;
-        return api_info_data;
+            // typia.assertEquals<OntologyInfo[]>(api_info_data);
+            this.ontologiesCache = api_info_data;
+            return api_info_data;
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            throw new Error(`Error fetching ontologies: ${msg}`);
+        } finally {
+            // Release slot even on any errors
+            this.releaseRequestSlot(lock_data);
+        }
     }
 
     async getPropertiesFromIncomingProperty(property_name: string, abort_signal?: AbortSignal): Promise<RelativePropertyData[]> {
@@ -240,7 +350,7 @@ export class DataShapesClient {
                 main: {
                     use_pp_rels: true,
                     propertyKind: 'All',
-                    limit: 50,
+                    limit: 500,
                     schemaName: ont
                 },
                 element: {
@@ -251,21 +361,26 @@ export class DataShapesClient {
             };
 
             try {
+                const lock_data = await this.acquireRequestSlot();
+                try {
+                    const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getProperties`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(config),
+                        signal: abort_signal,
+                    });
+                    const byte_data = await resp.text();
 
-                const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getProperties`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(config),
-                    signal: abort_signal,
-                });
-                const byte_data = await resp.text();
+                    const data = JSON.parse(byte_data.toString());
 
-                const data = JSON.parse(byte_data.toString());
-
-                const props = typia.assertEquals<GetPropertiesResponse>(data);
-                results.push(...props.data);
+                    const props = typia.assertEquals<GetPropertiesResponse>(data);
+                    // const props = data as GetPropertiesResponse;
+                    results.push(...props.data);
+                } finally {
+                    this.releaseRequestSlot(lock_data);
+                }
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 console.error(`Error fetching properties from ontology ${ont} for incoming property ${property_name}: ${msg}`);
@@ -285,7 +400,7 @@ export class DataShapesClient {
                 main: {
                     use_pp_rels: true,
                     propertyKind: 'All',
-                    limit: 50,
+                    limit: 500,
                     schemaName: ont
                 },
                 element: {
@@ -297,22 +412,29 @@ export class DataShapesClient {
             if (this.trace_log) {
                 console.log(`Fetching properties from ontology ${ont} for outgoing property ${property_name}`);
             }
-            const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getProperties`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(config),
-                signal: abort_signal,
-            });
-            const byte_data = await resp.text();
+            const lock_data = await this.acquireRequestSlot();
+            try {
+                const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getProperties`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(config),
+                    signal: abort_signal,
+                });
+                const byte_data = await resp.text();
 
-            const data = JSON.parse(byte_data.toString());
-            if (this.trace_log) {
-                console.log(`Fetched data: ${JSON.stringify(data, null, 2)}`);
+                const data = JSON.parse(byte_data.toString());
+                if (this.trace_log) {
+                    console.log(`Fetched data: ${JSON.stringify(data, null, 2)}`);
+                }
+                const props = typia.assertEquals<GetPropertiesResponse>(data);
+
+                // const props = data as GetPropertiesResponse;
+                results.push(...props.data);
+            } finally {
+                this.releaseRequestSlot(lock_data);
             }
-            const props = typia.assertEquals<GetPropertiesResponse>(data);
-            results.push(...props.data);
         }
         return results;
     }
@@ -348,30 +470,36 @@ export class DataShapesClient {
                     ...(meta ? {} : { endpointUrl: undefined }),
                 },
             };
-            const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getProperties`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(config),
-                signal: abort_signal,
-            });
-            if (resp.status != 200) {
-                console.error(`Error fetching properties for ontology ${ont} and individual ${instance_uri}: HTTP ${resp.status}`);
-                continue;
-            }
-            const byte_data = await resp.text();
-            const data = (() => {
-                try {
-                    return JSON.parse(byte_data.toString());
-                } catch (error) {
-                    console.error(`Error parsing JSON for ontology ${ont} and individual ${instance_uri}: ${byte_data}`);
-                    throw error;
+            const lock_data = await this.acquireRequestSlot();
+            try {
+                const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getProperties`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(config),
+                    signal: abort_signal,
+                });
+                if (resp.status != 200) {
+                    console.error(`Error fetching properties for ontology ${ont} and individual ${instance_uri}: HTTP ${resp.status}`);
+                    continue;
                 }
-            })();
-            const props = typia.assertEquals<GetPropertiesResponse>(data);
+                const byte_data = await resp.text();
+                const data = (() => {
+                    try {
+                        return JSON.parse(byte_data.toString());
+                    } catch (error) {
+                        console.error(`Error parsing JSON for ontology ${ont} and individual ${instance_uri}: ${byte_data}`);
+                        throw error;
+                    }
+                })();
+                const props = typia.assertEquals<GetPropertiesResponse>(data);
+                // const props = data as GetPropertiesResponse;
 
-            results.push(...props.data);
+                results.push(...props.data);
+            } finally {
+                this.releaseRequestSlot(lock_data);
+            }
 
         }
         if (this.trace_log) {
@@ -405,29 +533,38 @@ export class DataShapesClient {
                     uriIndividual: instance_uri
                 }
             };
-            const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getClasses`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(config),
-                signal: abort_signal,
-            });
-            const byte_data = await resp.text();
-            if (resp.status != 200) {
-                console.error(`Error fetching classes for ontology ${ont} and individual ${instance_uri}: HTTP ${resp.status}`);
-                continue;
-            }
-            const data = (() => {
-                try {
-                    return JSON.parse(byte_data.toString());
-                } catch (error) {
-                    console.error(`Error parsing JSON for ontology ${ont} and individual ${instance_uri}: ${byte_data}`);
-                    throw error;
+            const lock_data = await this.acquireRequestSlot();
+            try {
+                const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getClasses`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(config),
+                    signal: abort_signal,
+                });
+                const byte_data = await resp.text();
+                if (resp.status != 200) {
+                    console.error(`Error fetching classes for ontology ${ont} and individual ${instance_uri}: HTTP ${resp.status}`);
+                    continue;
                 }
-            })();
-            const classes = typia.assertEquals<Response<ClassData>>(data);
-            results.push(...classes.data);
+                const data = (() => {
+                    try {
+                        return JSON.parse(byte_data.toString());
+                    } catch (error) {
+                        console.error(`Error parsing JSON for ontology ${ont} and individual ${instance_uri}: ${byte_data}`);
+                        throw error;
+                    }
+                })();
+                const classes = typia.assertEquals<Response<ClassData>>(data);
+                // const classes = data as Response<ClassData>;
+                results.push(...classes.data);
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                console.error(`Error fetching classes for ontology ${ont} and individual ${instance_uri}: ${msg}`);
+            } finally {
+                this.releaseRequestSlot(lock_data);
+            }
         }
 
         if (this.trace_log) {
@@ -454,23 +591,32 @@ export class DataShapesClient {
         }
 
         for (const ont of this.ontologies) {
-            const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getClasses`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(config),
-                signal: abort_signal,
-            });
-            const byte_data = await resp.text();
-
-            const data = JSON.parse(byte_data.toString());
+            const lock_data = await this.acquireRequestSlot();
             try {
-                const classes = typia.assertEquals<Response<ClassData>>(data);
-                results.push(...classes.data);
+                const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getClasses`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(config),
+                    signal: abort_signal,
+                });
+                const byte_data = await resp.text();
+
+                const data = JSON.parse(byte_data.toString());
+                try {
+                    const classes = data as Response<ClassData>;
+                    // const classes = typia.assertEquals<Response<ClassData>>(data);
+                    results.push(...classes.data);
+                } catch (error) {
+                    // console.error(`data: ${JSON.stringify(data, null, 2)}`);
+                    throw error;
+                }
             } catch (error) {
-                // console.error(`data: ${JSON.stringify(data, null, 2)}`);
-                throw error;
+                const msg = error instanceof Error ? error.message : String(error);
+                console.error(`Error fetching classes for ontology ${ont} by incoming property ${instance_uri}: ${msg}`);
+            } finally {
+                this.releaseRequestSlot(lock_data);
             }
         }
 
@@ -499,19 +645,33 @@ export class DataShapesClient {
         }
 
         for (const ont of this.ontologies) {
-            const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getClasses`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(config),
-                signal: abort_signal,
-            });
-            const byte_data = await resp.text();
-
-            const data = JSON.parse(byte_data.toString());
-            const classes = typia.assertEquals<Response<ClassData>>(data);
-            results.push(...classes.data);
+            const lock_data = await this.acquireRequestSlot();
+            try {
+                const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getClasses`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(config),
+                    signal: abort_signal,
+                });
+                const byte_data = await resp.text();
+                try {
+                    const data = JSON.parse(byte_data.toString());
+                    const classes = data as Response<ClassData>;
+                    // const classes = typia.assertEquals<Response<ClassData>>(data);
+                    results.push(...classes.data);
+                } catch (error) {
+                    console.error(`Error parsing JSON for ontology ${ont} by outgoing property ${instance_uri}: ${byte_data}`);
+                    console.error(error);
+                    throw new Error(`Error parsing JSON for ontology ${ont} by outgoing property ${instance_uri}`);
+                }
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                console.error(`Error fetching classes for ontology ${ont} by outgoing property ${instance_uri}: ${msg}`);
+            } finally {
+                this.releaseRequestSlot(lock_data);
+            }
         }
 
         if (this.trace_log) {
@@ -550,29 +710,35 @@ export class DataShapesClient {
                     schemaName,
                 },
             };
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                const lock_data = await this.acquireRequestSlot();
+                try {
+                    const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/xx_getClasstoClassProperties`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(config_with_schema),
+                        signal: abort_signal,
+                    });
 
-            try {
-                const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/xx_getClasstoClassProperties`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(config_with_schema),
-                    signal: abort_signal,
-                });
+                    if (resp.status % 100 !== 2) {
+                        console.error(`Error fetching class-to-class properties for ontology ${ont}: HTTP ${resp.status}`);
+                        continue;
+                    }
 
-                if (resp.status % 100 !== 2) {
-                    console.error(`Error fetching class-to-class properties for ontology ${ont}: HTTP ${resp.status}`);
-                    continue;
+                    const byte_data = await resp.text();
+                    const data = JSON.parse(byte_data.toString());
+                    const props = data as Response<ClassToClassPropertyData>;
+                    // const props = typia.assertEquals<Response<ClassToClassPropertyData>>(data);
+                    results.push(...props.data);
+                    break; // success, exit retry loop
+                } catch (error) {
+                    const msg = error instanceof Error ? error.message : String(error);
+                    console.error(`Error fetching class-to-class properties for ontology ${ont}: ${msg}`);
+                } finally {
+                    this.releaseRequestSlot(lock_data);
                 }
-
-                const byte_data = await resp.text();
-                const data = JSON.parse(byte_data.toString());
-                const props = typia.assertEquals<Response<ClassToClassPropertyData>>(data);
-                results.push(...props.data);
-            } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
-                console.error(`Error fetching class-to-class properties for ontology ${ont}: ${msg}`);
             }
         }
 

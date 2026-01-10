@@ -7,7 +7,7 @@ import { Dictionary } from "underscore";
 
 const dss_url = 'https://dss.semtech.lv/api';
 const client = new DataShapesClient(dss_url);
-
+console.log("Fetching ontologies...");
 console.log((await client.fetchOntologies()).filter(o => o.db_schema_name.startsWith('dbpedia')));
 
 client.ontologies = ['dbpedia'];
@@ -158,43 +158,51 @@ class QueryResolver {
         const query_term = this.term_map.getOrCreateItem(term);
         try {
             if (typia.is<Item>(query_term)) {
+                const awaitables: Promise<void>[] = [];
                 // From incoming properties
                 for (const incoming_property_iri of query_term.incoming) {
-                    if (abort_signal?.aborted) break;
-                    const values = await this.registerResolution(incoming_property_iri, 'value', dependencies, abort_signal);
-                    if (values === null) continue;
-                    let subresult: Set<IRI> | null = null;
-                    for (const value_iri of values) {
-                        if (abort_signal?.aborted) break;
-                        const outgoing_properties = await this.client.getPropertiesFromIncomingProperty(value_iri, abort_signal);
-                        const out_properties = outgoing_properties.filter(p => p.mark === "out");
-                        const subsubresult = new Set(out_properties.map(p => p.iri));
-                        subresult = subresult ?? subsubresult;
-                        subresult = subresult.union(subsubresult);
-                    }
-                    if (subresult !== null) {
-                        result = result ?? subresult;
-                        result = result.intersection(subresult);
-                    }
+                    awaitables.push((async () => {
+                        const values = await this.registerResolution(incoming_property_iri, 'value', dependencies, abort_signal);
+                        if (values === null) return;
+                        let subresult: Set<IRI> | null = null;
+                        const awaitables_inner: Promise<void>[] = [];
+                        for (const value_iri of values) {
+                            awaitables_inner.push((async () => {
+                                const outgoing_properties = await this.client.getPropertiesFromIncomingProperty(value_iri, abort_signal);
+                                const out_properties = outgoing_properties.filter(p => p.mark === "out");
+                                const subsubresult = new Set(out_properties.map(p => p.iri));
+                                subresult = subresult ?? subsubresult;
+                                subresult = subresult.union(subsubresult);
+                            })());
+                        }
+                        await Promise.all(awaitables_inner);
+                        if (subresult !== null) {
+                            result = result ?? subresult as Set<IRI>;
+                            result = result.intersection(subresult);
+                        }
+                    })());
 
                 }
                 // From outgoing properties
                 for (const outgoing_property_iri of query_term.outgoing) {
-                    if (abort_signal?.aborted) break;
-                    const values = await this.registerResolution(outgoing_property_iri, 'value', dependencies, abort_signal);
-                    if (values === null) continue;
-                    result = result ?? values;
-                    result = result.intersection(values);
+                    awaitables.push((async () => {
+                        const values = await this.registerResolution(outgoing_property_iri, 'value', dependencies, abort_signal);
+                        if (values === null) return;
+                        result = result ?? values;
+                        result = result.intersection(values);
+                    })());
                 }
                 // From values
                 for (const value_iri of await this.registerResolution(term, 'value', dependencies, abort_signal) ?? new Set()) {
-                    if (abort_signal?.aborted) break;
-                    const outgoing_properties = await this.client.getPropertiesOfIndividual(value_iri, abort_signal);
-                    const out_properties = outgoing_properties.filter(p => p.mark === "out");
-                    const subresult = new Set(out_properties.map(p => p.iri));
-                    result = result ?? subresult;
-                    result = result.intersection(subresult);
+                    awaitables.push((async () => {
+                        const outgoing_properties = await this.client.getPropertiesOfIndividual(value_iri, abort_signal);
+                        const out_properties = outgoing_properties.filter(p => p.mark === "out");
+                        const subresult = new Set(out_properties.map(p => p.iri));
+                        result = result ?? subresult;
+                        result = result.intersection(subresult);
+                    })());
                 }
+                await Promise.all(awaitables);
 
             } else if (typia.is<IRI>(query_term)) {
                 if (abort_signal?.aborted) return result;
@@ -234,43 +242,51 @@ class QueryResolver {
         const query_term = this.term_map.getOrCreateItem(term);
         try {
             if (typia.is<Item>(query_term)) {
+                const awaitables: Promise<void>[] = [];
                 // From incoming properties
                 for (const incoming_property_iri of query_term.incoming) {
-                    if (abort_signal?.aborted) break;
-                    const values = await this.registerResolution(incoming_property_iri, 'value', dependencies, abort_signal);
-                    if (values === null) continue;
-                    result = result ?? values;
-                    result = result.intersection(values);
+                    awaitables.push((async () => {
+                        const values = await this.registerResolution(incoming_property_iri, 'value', dependencies, abort_signal);
+                        if (values === null) return;
+                        result = result ?? values;
+                        result = result.intersection(values);
+                    })());
                 }
                 // From outgoing properties
                 for (const outgoing_property_iri of query_term.outgoing) {
-                    if (abort_signal?.aborted) break;
-                    const values = await this.registerResolution(outgoing_property_iri, 'value', dependencies, abort_signal);
-                    if (values === null) continue;
-                    let subresult: Set<IRI> | null = null;
-                    for (const value_iri of values) {
-                        if (abort_signal?.aborted) break;
-                        const incoming_properties = await this.client.getPropertiesFromOutgoingProperty(value_iri, abort_signal);
-                        const in_properties = incoming_properties.filter(p => p.mark === "in");
-                        const subsubresult = new Set(in_properties.map(p => p.iri));
-                        subresult = subresult ?? subsubresult;
-                        subresult = subresult.union(subsubresult);
-                    }
-                    if (subresult !== null) {
-                        result = result ?? subresult;
-                        result = result.intersection(subresult);
-                    }
+                    awaitables.push((async () => {
+                        const values = await this.registerResolution(outgoing_property_iri, 'value', dependencies, abort_signal);
+                        if (values === null) return;
+                        let subresult: Set<IRI> | null = null;
+                        const awaitables_inner: Promise<void>[] = [];
+                        for (const value_iri of values) {
+                            awaitables_inner.push((async () => {
+                                const incoming_properties = await this.client.getPropertiesFromOutgoingProperty(value_iri, abort_signal);
+                                const in_properties = incoming_properties.filter(p => p.mark === "in");
+                                const subsubresult = new Set(in_properties.map(p => p.iri));
+                                subresult = subresult ?? subsubresult;
+                                subresult = subresult.union(subsubresult);
+                            })());
+                        }
+                        await Promise.all(awaitables_inner);
+                        if (subresult !== null) {
+                            result = result ?? subresult as Set<IRI>;
+                            result = result.intersection(subresult);
+                        }
+                    })());
                 }
                 // From values
                 // In case the term is also used as a predicate
                 for (const value_iri of await this.registerResolution(term, 'value', dependencies, abort_signal) ?? new Set()) {
-                    if (abort_signal?.aborted) break;
-                    const incoming_properties = await this.client.getPropertiesOfIndividual(value_iri, abort_signal);
-                    const in_properties = incoming_properties.filter(p => p.mark === "in");
-                    const subresult = new Set(in_properties.map(p => p.iri));
-                    result = result ?? subresult;
-                    result = result.intersection(subresult);
+                    awaitables.push((async () => {
+                        const incoming_properties = await this.client.getPropertiesOfIndividual(value_iri, abort_signal);
+                        const in_properties = incoming_properties.filter(p => p.mark === "in");
+                        const subresult = new Set(in_properties.map(p => p.iri));
+                        result = result ?? subresult;
+                        result = result.intersection(subresult);
+                    })());
                 }
+                await Promise.all(awaitables);
             } else if (typia.is<IRI>(query_term)) {
                 if (abort_signal?.aborted) return result;
                 const properties = await this.client.getPropertiesOfIndividual(query_term, abort_signal);
@@ -288,8 +304,6 @@ class QueryResolver {
             }
         }
         return result;
-
-
     }
 
 
@@ -313,22 +327,24 @@ class QueryResolver {
         const query_term = this.term_map.getOrCreateItem(term);
         try {
             if (typia.is<Item>(query_term)) {
-
+                const awaitables: Promise<void>[] = [];
                 for (const incoming_property_iri of query_term.subjects) {
-                    if (abort_signal?.aborted) break;
-                    const values = await this.registerResolution(incoming_property_iri, 'outgoing', dependencies, abort_signal);
-                    if (values === null) continue;
-                    result = result ?? values;
-                    result = result.intersection(values);
+                    awaitables.push((async () => {
+                        const values = await this.registerResolution(incoming_property_iri, 'outgoing', dependencies, abort_signal);
+                        if (values === null) return;
+                        result = result ?? values;
+                        result = result.intersection(values);
+                    })());
                 }
                 for (const outgoing_property_iri of query_term.objects) {
-                    if (abort_signal?.aborted) break;
-                    const values = await this.registerResolution(outgoing_property_iri, 'incoming', dependencies, abort_signal);
-                    if (values === null) continue;
-                    result = result ?? values;
-                    result = result.intersection(values);
-
+                    awaitables.push((async () => {
+                        const values = await this.registerResolution(outgoing_property_iri, 'incoming', dependencies, abort_signal);
+                        if (values === null) return;
+                        result = result ?? values;
+                        result = result.intersection(values);
+                    })());
                 }
+                await Promise.all(awaitables);
             } else if (typia.is<IRI>(query_term)) {
                 // Concrete IRI
                 result = new Set<IRI>([query_term]);
@@ -364,40 +380,50 @@ class QueryResolver {
         const query_term = this.term_map.getOrCreateItem(term);
         try {
             if (typia.is<Item>(query_term)) {
+                const awaitables: Promise<void>[] = [];
                 for (const incoming_property_iri of query_term.incoming) {
-                    if (abort_signal?.aborted) break;
-                    const values = await this.registerResolution(incoming_property_iri, 'value', dependencies, abort_signal);
-                    if (values === null) continue;
-                    let subresult: Set<IRI> | null = null;
-                    for (const value_iri of values) {
-                        if (abort_signal?.aborted) break;
-                        const class_data = await this.client.getClassesByIncoming(value_iri, abort_signal);
-                        const class_iris = new Set<IRI>(class_data.map(c => c.iri));
-                        subresult = subresult ?? class_iris;
-                        subresult = subresult.union(class_iris);
-                    }
-                    if (subresult !== null) {
-                        result = result ?? subresult;
-                        result = result.intersection(subresult);
-                    }
+                    awaitables.push((async () => {
+                        const values = await this.registerResolution(incoming_property_iri, 'value', dependencies, abort_signal);
+                        if (values === null) return;
+                        let subresult: Set<IRI> | null = null;
+                        const awaitables_inner: Promise<void>[] = [];
+                        for (const value_iri of values) {
+                            awaitables_inner.push((async () => {
+                                const class_data = await this.client.getClassesByIncoming(value_iri, abort_signal);
+                                const class_iris = new Set<IRI>(class_data.map(c => c.iri));
+                                subresult = subresult ?? class_iris;
+                                subresult = subresult.union(class_iris);
+                            })());
+                        }
+                        await Promise.all(awaitables_inner);
+                        if (subresult !== null) {
+                            result = result ?? subresult as Set<IRI>;
+                            result = result.intersection(subresult);
+                        }
+                    })());
                 }
                 for (const outgoing_property_iri of query_term.outgoing) {
-                    if (abort_signal?.aborted) break;
-                    const values = await this.registerResolution(outgoing_property_iri, 'value', dependencies, abort_signal);
-                    if (values === null) continue;
-                    let subresult: Set<IRI> | null = null;
-                    for (const value_iri of values) {
-                        if (abort_signal?.aborted) break;
-                        const class_data = await this.client.getClassesByOutgoing(value_iri, abort_signal);
-                        const class_iris = new Set<IRI>(class_data.map(c => c.iri));
-                        subresult = subresult ?? class_iris;
-                        subresult = subresult.union(class_iris);
-                    }
-                    if (subresult !== null) {
-                        result = result ?? subresult;
-                        result = result.intersection(subresult);
-                    }
+                    awaitables.push((async () => {
+                        const values = await this.registerResolution(outgoing_property_iri, 'value', dependencies, abort_signal);
+                        if (values === null) return;
+                        let subresult: Set<IRI> | null = null;
+                        const awaitables_inner: Promise<void>[] = [];
+                        for (const value_iri of values) {
+                            awaitables_inner.push((async () => {
+                                const class_data = await this.client.getClassesByOutgoing(value_iri, abort_signal);
+                                const class_iris = new Set<IRI>(class_data.map(c => c.iri));
+                                subresult = subresult ?? class_iris;
+                                subresult = subresult.union(class_iris);
+                            })());
+                        }
+                        await Promise.all(awaitables_inner);
+                        if (subresult !== null) {
+                            result = result ?? subresult as Set<IRI>;
+                            result = result.intersection(subresult);
+                        }
+                    })());
                 }
+                await Promise.all(awaitables);
             } else if (typia.is<IRI>(query_term)) {
                 if (abort_signal?.aborted) return result;
                 const class_data = await this.client.getClassesOfIndividual(query_term, abort_signal);
@@ -457,8 +483,10 @@ resolver.client = client;
 const triples: [string, string, string][] = [
     ['http://dbpedia.org/resource/Jack_Black', '?p1', '?a2'],      // ?a2 = person
     ['?a2', '?p2', '?a3'],                                        // person -> ?a3 via ?p2
-    // ['?b2', '?p3', '?a3'],                                        // university -> SAME ?a3 via ?p3
+    ['?b2', '?p3', '?a3'],                                        // university -> SAME ?a3 via ?p3
     // ['?b1', 'http://data.nobelprize.org/terms/university', '?a2'], // ?b2 = university
+    // ['?v1', 'http://data.nobelprize.org/terms/university', '?v2'],
+    // ['?v1', '?q', '?v3']
 ];
 
 
@@ -470,19 +498,25 @@ resolver.client.trace_log = true;
 
 // console.log(await resolver.resolveValue('?p3'));
 resolver.resolution_timeout_ms = -1;
+
 console.log("Starting resolution...");
 const time_start = Date.now();
-const answer = await resolver.resolveValue('?p2');
-const time_end = Date.now();
-console.log("Resolution finished.");
-console.log(`Resolution took ${time_end - time_start} ms`);
+try {
+    const answer = await resolver.resolveClass('?b2');
+    const time_end = Date.now();
+    console.log("Resolution finished.");
+    console.log(`Resolution took ${time_end - time_start} ms`);
 
-console.log("Answer:");
-console.log(answer);
+    console.log("Answer:");
+    console.log(answer);
 
-// console.log(await (resolver.term_map.getOrCreateItem('?a2') as Item).getOutgoingFromIncoming(client, resolver.term_map));
-// console.log(await (resolver.term_map.getOrCreateItem('?b2') as Item).getOutgoingFromIncoming(client, resolver.term_map));
-// console.log(await (resolver.term_map.getOrCreateItem('?a3') as Item).getOutgoingFromIncoming(client, resolver.term_map));
-fs.writeFileSync('debug_response.json', JSON.stringify(answer?.values()?.toArray() ?? [], null, 4));
+    // console.log(await (resolver.term_map.getOrCreateItem('?a2') as Item).getOutgoingFromIncoming(client, resolver.term_map));
+    // console.log(await (resolver.term_map.getOrCreateItem('?b2') as Item).getOutgoingFromIncoming(client, resolver.term_map));
+    // console.log(await (resolver.term_map.getOrCreateItem('?a3') as Item).getOutgoingFromIncoming(client, resolver.term_map));
+    fs.writeFileSync('debug_response.json', JSON.stringify(answer?.values()?.toArray() ?? [], null, 4));
 
+} finally {
+    console.log(resolver.client.peakOngoingRequests);
+    console.log(resolver.client.totalRequestsMade);
+}
 export { }
