@@ -1,16 +1,18 @@
 
 
 import typia, { is } from "typia";
-import { ClassData, DataShapesClient, PropertyData } from "./queries.js";
+import { ClassData, DataShapesClient, PropertyData, QueryBuilder } from "./queries.js";
 import fs from "fs";
 import { Dictionary } from "underscore";
 
 const dss_url = 'https://dss.semtech.lv/api';
 const client = new DataShapesClient(dss_url);
 console.log("Fetching ontologies...");
-console.log((await client.fetchOntologies()).filter(o => o.db_schema_name.startsWith('dbpedia')));
+const ontologies = await client.fetchOntologies();
 
-client.ontologies = ['dbpedia'];
+
+client.ontologies = ['nobel_prizes_orig'];
+client.schema_name_map = new Map<string, string>(client.ontologies.map(ont => [ont, ontologies.find(o => o.db_schema_name === ont)?.schema_name ?? ont]));
 
 interface BaseItem {
     variable: string;
@@ -54,9 +56,11 @@ type QueryTerm = Item | IRI;
 
 class QueryDB {
     private _dictionary: Dictionary<Item>;
+    private _triples: Array<[string, string, string]>;
 
     constructor() {
         this._dictionary = {};
+        this._triples = [];
     }
     getOrCreateItem(term: string): QueryTerm {
         if (isVariable(term)) {
@@ -70,6 +74,7 @@ class QueryDB {
     }
 
     addTriple(s: string, p: string, o: string) {
+        this._triples.push([s, p, o]);
         const subject_item = this.getOrCreateItem(s);
         const predicate_item = this.getOrCreateItem(p);
         const object_item = this.getOrCreateItem(o);
@@ -85,6 +90,9 @@ class QueryDB {
         }
     }
 
+    classesOfVariable(variable: string): string[] {
+        return this._triples.filter(([s, p, o]) => s === variable && p === 'a').map(([s, p, o]) => o);
+    }
 }
 
 type ResolutionKey = string;
@@ -458,6 +466,141 @@ class QueryResolver {
         return classes;
     }
 
+
+    async suggestIncomingProperties(term: string, limit: number = 500): Promise<string[]> {
+        const abort_controller = new AbortController();
+        const abort_signal = abort_controller.signal;
+        const item = this.term_map.getOrCreateItem(term);
+        if (!typia.is<Item>(item)) {
+            console.warn(`Term ${term} is not a variable in the query map.`);
+            return [];
+        }
+        // layer 1 data
+        const known_classes = this.term_map.classesOfVariable(term);
+        // filter so only known properties remain
+        const known_outgoing = Array.from(item.outgoing).filter(p => typia.is<IRI>(this.term_map.getOrCreateItem(p)));
+        const known_incoming = Array.from(item.incoming).filter(p => typia.is<IRI>(this.term_map.getOrCreateItem(p)));
+
+        const suggestions: Promise<[string, 'in' | 'out'][]>[] = [];
+        if (known_classes.length === 0) {
+            const builder = new QueryBuilder();
+            builder.incomingProperties = known_incoming;
+            builder.outgoingProperties = known_outgoing;
+            builder.limit = limit;
+            builder.usePPRels = true;
+            builder.propertyKind = 'ObjectExt';
+            const params = builder.buildDSSParams();
+            suggestions.push(this.client.getProperties(params, abort_signal));
+        } else {
+            for (const class_iri of known_classes) {
+                const builder = new QueryBuilder();
+                builder.className = class_iri;
+                builder.incomingProperties = known_incoming;
+                builder.outgoingProperties = known_outgoing;
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal))
+            }
+        }
+        const suggestion_results = await Promise.all(suggestions);
+        const suggestion_sets = suggestion_results.map(res => new Set(res.filter(p => p[1] === 'in').map(p => p[0])));
+        const final_suggestions = suggestion_sets.reduce((acc, set) => {
+            if (acc === null) return set;
+            return acc.intersection(set);
+        }, null as Set<string> | null);
+        return Array.from(final_suggestions ?? []).slice(0, limit);
+    }
+
+    async suggestOutgoingProperties(term: string, limit: number = 10): Promise<string[]> {
+        const abort_controller = new AbortController();
+        const abort_signal = abort_controller.signal;
+        const item = this.term_map.getOrCreateItem(term);
+        if (!typia.is<Item>(item)) {
+            console.warn(`Term ${term} is not a variable in the query map.`);
+            return [];
+        }
+        // layer 1 data
+        const known_classes = this.term_map.classesOfVariable(term);
+        const known_outgoing = Array.from(item.outgoing).filter(p => typia.is<IRI>(this.term_map.getOrCreateItem(p)));
+        const known_incoming = Array.from(item.incoming).filter(p => typia.is<IRI>(this.term_map.getOrCreateItem(p)));
+        const suggestions: Promise<[string, 'in' | 'out'][]>[] = [];
+        if (known_classes.length === 0) {
+            const builder = new QueryBuilder();
+            builder.incomingProperties = known_incoming;
+            builder.outgoingProperties = known_outgoing;
+            builder.usePPRels = true;
+            builder.limit = limit;
+            builder.propertyKind = 'ObjectExt';
+            const params = builder.buildDSSParams();
+            suggestions.push(this.client.getProperties(params, abort_signal));
+        } else {
+            for (const class_iri of known_classes) {
+                const builder = new QueryBuilder();
+                builder.className = class_iri;
+                builder.incomingProperties = known_incoming;
+                builder.outgoingProperties = known_outgoing;
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal));
+            }
+        }
+        const suggestion_results = await Promise.all(suggestions);
+        const suggestion_sets = suggestion_results.map(res => new Set(res.filter(p => p[1] === 'out').map(p => p[0])));
+        const final_suggestions = suggestion_sets.reduce((acc, set) => {
+            if (acc === null) return set;
+            return acc.intersection(set);
+        }, null as Set<string> | null);
+        return Array.from(final_suggestions ?? []).slice(0, limit);
+    }
+
+    async suggestClasses(term: string, limit: number = 10): Promise<string[]> {
+        const abort_controller = new AbortController();
+        const abort_signal = abort_controller.signal;
+        const item = this.term_map.getOrCreateItem(term);
+        if (!typia.is<Item>(item)) {
+            console.warn(`Term ${term} is not a variable in the query map.`);
+            return [];
+        }
+
+        // layer 1 data
+        const known_classes = this.term_map.classesOfVariable(term);
+        const known_outgoing = Array.from(item.outgoing).filter(p => !isVariable(p));
+        const known_incoming = Array.from(item.incoming).filter(p => !isVariable(p));
+        const suggestions: Promise<string[]>[] = [];
+        if (known_classes.length === 0) {
+            const builder = new QueryBuilder();
+            builder.incomingProperties = known_incoming;
+            builder.outgoingProperties = known_outgoing;
+            // builder.usePPRels = true;
+            builder.propertyKind = 'ObjectExt';
+            builder.limit = limit;
+            const params = builder.buildDSSParams();
+            suggestions.push(this.client.getClasses(params, abort_signal));
+        } else {
+            for (const class_iri of known_classes) {
+                const builder = new QueryBuilder();
+                builder.className = class_iri;
+                builder.incomingProperties = known_incoming;
+                builder.outgoingProperties = known_outgoing;
+                // builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getClasses(params, abort_signal));
+            }
+        }
+        const suggestion_results = await Promise.all(suggestions);
+        const suggestion_sets = suggestion_results.map(res => new Set(res));
+        const final_suggestions = suggestion_sets.reduce((acc, set) => {
+            if (acc === null) return set;
+            return acc.intersection(set);
+        }, null as Set<string> | null);
+        return Array.from(final_suggestions ?? []).slice(0, limit);
+    }
 }
 
 // A query term can be either a variable or a concrete IRI
@@ -481,12 +624,20 @@ const resolver = new QueryResolver();
 resolver.client = client;
 
 const triples: [string, string, string][] = [
-    ['http://dbpedia.org/resource/Jack_Black', '?p1', '?a2'],      // ?a2 = person
-    ['?a2', '?p2', '?a3'],                                        // person -> ?a3 via ?p2
-    ['?b2', '?p3', '?a3'],                                        // university -> SAME ?a3 via ?p3
+    // ['http://dbpedia.org/resource/Jack_Black', '?p1', '?a2'],      // ?a2 = person
+    // ['?a2', '?p2', '?a3'],                                        // person -> ?a3 via ?p2
+    // ['?b2', '?p3', '?a3'],                                        // university -> SAME ?a3 via ?p3
     // ['?b1', 'http://data.nobelprize.org/terms/university', '?a2'], // ?b2 = university
     // ['?v1', 'http://data.nobelprize.org/terms/university', '?v2'],
     // ['?v1', '?q', '?v3']
+
+    ['?v1', 'rdf:label', '?v2'],
+    ['?v1', 'foaf:gender', '?v3'],
+    ['?v1', 'nobel:nobelPrize', '?v4'],
+    ['?v4', 'nobel:category', 'http://data.nobelprize.org/terms/Physics']
+
+    // ['?v1', 'http://dbpedia.org/ontology/birthPlace', '?v2'],
+    // ['?v1', 'http://dbpedia.org/ontology/riverMouth', '?v3']
 ];
 
 
@@ -498,25 +649,29 @@ resolver.client.trace_log = true;
 
 // console.log(await resolver.resolveValue('?p3'));
 resolver.resolution_timeout_ms = -1;
+resolver.client.simultaneous_requests_limit = 10;
+let total_time = 0;
+for (let i = 0; i < 10; i++) {
+    const time_start = Date.now();
+    try {
+        console.log("Starting resolution...");
+        const answer = await resolver.suggestOutgoingProperties('?v1', 300);
+        const time_end = Date.now();
+        // console.log("Resolution finished.");
+        // console.log(`Resolution took ${time_end - time_start} ms`);
+        total_time += time_end - time_start; ``
+        console.log("Answer:");
+        console.log(answer);
 
-console.log("Starting resolution...");
-const time_start = Date.now();
-try {
-    const answer = await resolver.resolveClass('?b2');
-    const time_end = Date.now();
-    console.log("Resolution finished.");
-    console.log(`Resolution took ${time_end - time_start} ms`);
+        // console.log(await (resolver.term_map.getOrCreateItem('?a2') as Item).getOutgoingFromIncoming(client, resolver.term_map));
+        // console.log(await (resolver.term_map.getOrCreateItem('?b2') as Item).getOutgoingFromIncoming(client, resolver.term_map));
+        // console.log(await (resolver.term_map.getOrCreateItem('?a3') as Item).getOutgoingFromIncoming(client, resolver.term_map));
+        fs.writeFileSync('debug_response.json', JSON.stringify(answer?.values()?.toArray() ?? [], null, 4));
 
-    console.log("Answer:");
-    console.log(answer);
-
-    // console.log(await (resolver.term_map.getOrCreateItem('?a2') as Item).getOutgoingFromIncoming(client, resolver.term_map));
-    // console.log(await (resolver.term_map.getOrCreateItem('?b2') as Item).getOutgoingFromIncoming(client, resolver.term_map));
-    // console.log(await (resolver.term_map.getOrCreateItem('?a3') as Item).getOutgoingFromIncoming(client, resolver.term_map));
-    fs.writeFileSync('debug_response.json', JSON.stringify(answer?.values()?.toArray() ?? [], null, 4));
-
-} finally {
-    console.log(resolver.client.peakOngoingRequests);
-    console.log(resolver.client.totalRequestsMade);
+    } finally {
+        // console.log(resolver.client.peakOngoingRequests);
+        // console.log(resolver.client.totalRequestsMade);
+    }
 }
+console.log(`Average request time: ${total_time / 10}`);
 export { }

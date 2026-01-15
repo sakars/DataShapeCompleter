@@ -32,7 +32,7 @@ export type OntologyInfo = {
 
 type DSSParams = {
     main?: {
-        propertyKind?: 'All';
+        propertyKind?: 'All' | 'ObjectExt';
         limit?: number;
         pList?: {
             in?: {
@@ -54,6 +54,7 @@ type DSSParams = {
         endpointUrl?: string;
         schemaName?: string;
         schemaType?: string;
+        linksWithTargets?: boolean;
         has_followers_ok?: boolean;
         has_outgoing_props_ok?: boolean;
         has_incoming_props_ok?: boolean;
@@ -154,8 +155,8 @@ type RelativePropertyData = PropertyData & {
     object_cnt_x: string;
     data_cnt_x: string;
     is_local: boolean;
-    domain_class_id: null | number;
-    range_class_id: null | number;
+    domain_class_id?: null | number;
+    range_class_id?: null | number;
     classes_in_schema?: boolean;
     is_classifier?: boolean;
     use_in_class?: boolean | null;
@@ -172,6 +173,19 @@ type RelativePropertyData = PropertyData & {
     has_outgoing_props_ok?: boolean;
     o: string | number;
     full_name: string;
+    class_iri?: string | null;
+    class_prefix?: string | null;
+    class_display_name?: string | null;
+    class_local_name?: string | null;
+    class_is_unique?: boolean | null;
+    class_namestring?: string | null;
+    local_priority?: number;
+    class_is_local?: boolean | null;
+    class_cprop_id?: number | null;
+    class_cprop?: string | null;
+    class_adornment?: string | null;
+    class_is_literal?: boolean | null;
+    cname_datatype_id?: number | null;
 };
 
 type GetPropertiesResponse = {
@@ -181,6 +195,8 @@ type GetPropertiesResponse = {
     ontology: string;
 };
 
+type BaseDSSParams =
+    Required<Pick<DSSParams, 'main' | 'element'>>;
 
 export class DataShapesClient {
     private baseUrl: string;
@@ -207,6 +223,8 @@ export class DataShapesClient {
     private request_times: number[] = [];
 
     private wait_queue: [() => void, () => void][] = [];
+
+    public schema_name_map: Map<string, string> = new Map();
 
     constructor(baseUrl: string) {
         this.baseUrl = baseUrl;
@@ -273,6 +291,10 @@ export class DataShapesClient {
         // }
         if (this.ongoing_requests < this.simultaneous_requests_limit) {
             this.ongoing_requests += 1;
+            if (this.peak_ongoing_requests < this.ongoing_requests) {
+                this.peak_ongoing_requests = this.ongoing_requests;
+            }
+            this.total_requests_made += 1;
             return {
                 acquired_timestamp: Date.now(),
 
@@ -282,6 +304,10 @@ export class DataShapesClient {
             this.wait_queue.push([
                 () => {
                     this.ongoing_requests += 1;
+                    if (this.peak_ongoing_requests < this.ongoing_requests) {
+                        this.peak_ongoing_requests = this.ongoing_requests;
+                    }
+                    this.total_requests_made += 1;
                     resolve({ acquired_timestamp: Date.now() });
                 },
                 () => {
@@ -335,6 +361,7 @@ export class DataShapesClient {
             // Release slot even on any errors
             this.releaseRequestSlot(lock_data);
         }
+
     }
 
     async getPropertiesFromIncomingProperty(property_name: string, abort_signal?: AbortSignal): Promise<RelativePropertyData[]> {
@@ -748,11 +775,147 @@ export class DataShapesClient {
 
         return results;
     }
+
+    async getProperties(params: BaseDSSParams, abort_signal?: AbortSignal): Promise<[string, 'in' | 'out'][]> {
+
+        if (!(params.main.limit)) {
+            params.main.limit = 500;
+        }
+        const limit = params.main.limit;
+
+        const ontRequests: Promise<GetPropertiesResponse | null>[] = [];
+        for (const ont of this.ontologies) {
+            ontRequests.push((async () => {
+                params.main.schemaName = this.schema_name_map.get(ont) ?? ont;
+                const lock_data = await this.acquireRequestSlot();
+                try {
+                    const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getProperties`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(params),
+                        signal: abort_signal,
+                    });
+                    const byte_data = await resp.text();
+                    const data = JSON.parse(byte_data.toString());
+                    const props = typia.assertEquals<GetPropertiesResponse>(data);
+                    if (!props.complete) {
+                        if (this.trace_log) {
+                            console.warn(`Warning: fetched properties for ontology ${ont} not complete (limit ${limit} reached) Ignoring results.`);
+                        }
+                        return null;
+                    }
+                    return props;
+                }
+                catch (error) {
+                    const msg = error instanceof Error ? error.message : String(error);
+                    console.error(`Error fetching properties for ontology ${ont}: ${msg}`);
+                }
+                finally {
+                    this.releaseRequestSlot(lock_data);
+                }
+                return null;
+            })());
+        }
+        const results: GetPropertiesResponse[] = (await Promise.all(ontRequests)).filter(x => x !== null);
+        return results.flatMap(r => r.data.map(p => [p.iri, p.mark] as [string, 'in' | 'out']));
+    }
+
+    async getClasses(params: BaseDSSParams, abort_signal?: AbortSignal): Promise<string[]> {
+
+        if (!(params.main.limit)) {
+            params.main.limit = 500;
+        }
+        const limit = params.main.limit;
+
+        const results: Promise<ClassFetchResponse | null>[] = [];
+        for (const ont of this.ontologies) {
+            results.push((async () => {
+                params.main.schemaName = this.schema_name_map.get(ont) ?? ont;
+                const lock_data = await this.acquireRequestSlot();
+                try {
+                    const resp = await fetch(`${this.baseUrl}/ontologies/${ont}/getClasses`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(params),
+                        signal: abort_signal,
+                    });
+                    const byte_data = await resp.text();
+                    const data = JSON.parse(byte_data.toString());
+                    const classes = typia.assertEquals<ClassFetchResponse>(data);
+                    if (!classes.complete) {
+                        if (this.trace_log) {
+                            console.warn(`Warning: fetched classes for ontology ${ont} not complete (limit ${limit} reached) Ignoring results.`);
+                        }
+                        return null;
+                    }
+                    return classes;
+
+                }
+                catch (error) {
+                    const msg = error instanceof Error ? error.message : String(error);
+                    console.error(`Error fetching classes for ontology ${ont}: ${msg}`);
+                }
+                finally {
+                    this.releaseRequestSlot(lock_data);
+                }
+                return null;
+            })());
+        }
+        const results_resolved: ClassFetchResponse[] = (await Promise.all(results)).filter(x => x !== null) as ClassFetchResponse[];
+        return results_resolved.flatMap(r => r.data.map(c => c.iri));
+    }
 }
+
 
 export class QueryBuilder {
 
-    createDSSParams(): DSSParams {
-        return {};
+    public incomingProperties: string[] | null = null;
+    public outgoingProperties: string[] | null = null;
+    public className: string | null = null;
+    public instanceIRI: string | null = null;
+    public ontology: string | null = null;
+    public limit: number = 500;
+    public usePPRels: boolean | null = null;
+    public propertyKind: 'All' | 'ObjectExt' | null = null;
+    public linksWithTargets: boolean | null = true;
+
+    public buildDSSParams(): BaseDSSParams {
+        let params: BaseDSSParams = {
+            main: {},
+            element: {}
+        };
+        if (this.instanceIRI !== null) {
+            params.element.uriIndividual = this.instanceIRI;
+        }
+        if (this.incomingProperties !== null) {
+            params.element.pList = params.element.pList ?? {};
+            params.element.pList.in = this.incomingProperties.map(v => ({ name: v, type: 'in' }));
+        }
+        if (this.outgoingProperties !== null) {
+            params.element.pList = params.element.pList ?? {};
+            params.element.pList.out = this.outgoingProperties.map(v => ({ name: v, type: 'out' }));
+        }
+        if (this.className !== null) {
+            params.main.className = this.className;
+        }
+        params.main.limit = this.limit;
+        if (this.ontology !== null) {
+            params.main.schemaName = this.ontology;
+        }
+        if (this.usePPRels !== null) {
+            params.main.use_pp_rels = this.usePPRels;
+        }
+        if (this.propertyKind !== null) {
+            params.main.propertyKind = this.propertyKind;
+        }
+        if (this.linksWithTargets !== null) {
+            params.main.linksWithTargets = this.linksWithTargets;
+        }
+        return params;
     }
+
 }
