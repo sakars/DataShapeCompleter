@@ -122,25 +122,59 @@ class QueryResolver {
 
         const suggestions: Promise<[string, 'in' | 'out'][]>[] = [];
         if (known_classes.length === 0) {
-            const builder = new QueryBuilder();
-            builder.incomingProperties = known_incoming;
-            builder.outgoingProperties = known_outgoing;
-            builder.limit = limit;
-            builder.usePPRels = true;
-            builder.propertyKind = 'ObjectExt';
-            const params = builder.buildDSSParams();
-            suggestions.push(this.client.getProperties(params, abort_signal));
-        } else {
-            for (const class_iri of known_classes) {
+            for (const incoming_property of known_incoming) {
                 const builder = new QueryBuilder();
-                builder.className = class_iri;
-                builder.incomingProperties = known_incoming;
-                builder.outgoingProperties = known_outgoing;
+                builder.incomingProperties = [incoming_property];
+                builder.outgoingProperties = [];
                 builder.usePPRels = true;
                 builder.propertyKind = 'ObjectExt';
                 builder.limit = limit;
                 const params = builder.buildDSSParams();
-                suggestions.push(this.client.getProperties(params, abort_signal))
+                suggestions.push(this.client.getProperties(params, abort_signal));
+            }
+            for (const outgoing_property of known_outgoing) {
+                const builder = new QueryBuilder();
+                builder.incomingProperties = [];
+                builder.outgoingProperties = [outgoing_property];
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal));
+            }
+        } else {
+            for (const class_iri of known_classes) {
+                const builder = new QueryBuilder();
+                builder.className = class_iri;
+                // builder.incomingProperties = known_incoming;
+                // builder.outgoingProperties = known_outgoing;
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal));
+            }
+            for (const incoming_property of known_incoming) {
+                const builder = new QueryBuilder();
+                // builder.className = class_iri;
+                builder.incomingProperties = [incoming_property];
+                builder.outgoingProperties = [];
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal));
+            }
+            for (const outgoing_property of known_outgoing) {
+                const builder = new QueryBuilder();
+                // builder.className = class_iri;
+                builder.incomingProperties = [];
+                builder.outgoingProperties = [outgoing_property];
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal));
             }
         }
         const suggestion_results = await Promise.all(suggestions);
@@ -166,20 +200,54 @@ class QueryResolver {
         const known_incoming = Array.from(item.incoming).filter(p => typia.is<IRI>(this.term_map.getOrCreateItem(p)));
         const suggestions: Promise<[string, 'in' | 'out'][]>[] = [];
         if (known_classes.length === 0) {
-            const builder = new QueryBuilder();
-            builder.incomingProperties = known_incoming;
-            builder.outgoingProperties = known_outgoing;
-            builder.usePPRels = true;
-            builder.limit = limit;
-            builder.propertyKind = 'ObjectExt';
-            const params = builder.buildDSSParams();
-            suggestions.push(this.client.getProperties(params, abort_signal));
+            for (const incoming_property of known_incoming) {
+                const builder = new QueryBuilder();
+                builder.incomingProperties = [incoming_property];
+                builder.outgoingProperties = [];
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal));
+            }
+            for (const outgoing_property of known_outgoing) {
+                const builder = new QueryBuilder();
+                builder.incomingProperties = [];
+                builder.outgoingProperties = [outgoing_property];
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal));
+            }
         } else {
             for (const class_iri of known_classes) {
                 const builder = new QueryBuilder();
                 builder.className = class_iri;
-                builder.incomingProperties = known_incoming;
-                builder.outgoingProperties = known_outgoing;
+                // builder.incomingProperties = known_incoming;
+                // builder.outgoingProperties = known_outgoing;
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal));
+            }
+            for (const incoming_property of known_incoming) {
+                const builder = new QueryBuilder();
+                // builder.className = class_iri;
+                builder.incomingProperties = [incoming_property];
+                builder.outgoingProperties = [];
+                builder.usePPRels = true;
+                builder.propertyKind = 'ObjectExt';
+                builder.limit = limit;
+                const params = builder.buildDSSParams();
+                suggestions.push(this.client.getProperties(params, abort_signal));
+            }
+            for (const outgoing_property of known_outgoing) {
+                const builder = new QueryBuilder();
+                // builder.className = class_iri;
+                builder.incomingProperties = [];
+                builder.outgoingProperties = [outgoing_property];
                 builder.usePPRels = true;
                 builder.propertyKind = 'ObjectExt';
                 builder.limit = limit;
@@ -255,7 +323,6 @@ const resolver = new QueryResolver();
 resolver.client = client;
 
 const triples: [string, string, string][] = [
-
     ['?v1', 'rdf:label', '?v2'],
     ['?v1', 'foaf:gender', '?v3'],
     ['?v1', 'nobel:nobelPrize', '?v4'],
@@ -267,21 +334,57 @@ for (const [s, p, o] of triples) {
     resolver.term_map.addTriple(s, p, o);
 }
 
-resolver.client.trace_log = true;
+resolver.client.trace_log = false;
 
 // console.log(await resolver.resolveValue('?p3'));
 resolver.resolution_timeout_ms = -1;
 resolver.client.simultaneous_requests_limit = 10;
-let total_time = 0;
-const time_start = Date.now();
-console.log("Starting resolution...");
-const answer = await resolver.suggestOutgoingProperties('?v1', 300);
-const time_end = Date.now();
-// console.log("Resolution finished.");
-// console.log(`Resolution took ${time_end - time_start} ms`);
-total_time += time_end - time_start; ``
-console.log("Answer:");
-console.log(answer);
+resolver.client.invalidateCache();
+{
+    let total_time = 0;
+    const time_start = Date.now();
+    console.log("Starting resolution...");
+    const answer = await resolver.suggestClasses('?v1', 300);
+    const time_end = Date.now();
+    // console.log("Resolution finished.");
+    // console.log(`Resolution took ${time_end - time_start} ms`);
+    total_time += time_end - time_start;
+    console.log(`Total resolution time: ${total_time} ms`);
+    console.log("Classes:");
+    console.log(answer);
 
-console.log(`Average request time: ${total_time / 10}`);
+}
+
+{
+    let total_time = 0;
+    const time_start = Date.now();
+    console.log("Starting resolution...");
+    const answer = await resolver.suggestIncomingProperties('?v1', 300);
+    const time_end = Date.now();
+    // console.log("Resolution finished.");
+    // console.log(`Resolution took ${time_end - time_start} ms`);
+    total_time += time_end - time_start;
+    console.log(`Total resolution time: ${total_time} ms`);
+    console.log("Incoming Properties:");
+    console.log(answer);
+
+}
+{
+    let total_time = 0;
+    const time_start = Date.now();
+    console.log("Starting resolution...");
+    const answer = await resolver.suggestOutgoingProperties('?v1', 300);
+    const time_end = Date.now();
+    // console.log("Resolution finished.");
+    // console.log(`Resolution took ${time_end - time_start} ms`);
+    total_time += time_end - time_start;
+    console.log(`Total resolution time: ${total_time} ms`);
+    console.log("Outgoing Properties:");
+    console.log(answer);
+
+}
+
+
+
+// console.log(`Average request time: ${total_time / 10}`);
 export { }

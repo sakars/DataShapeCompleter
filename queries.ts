@@ -321,7 +321,9 @@ export class DataShapesClient {
         // console.log(`Request completed in ${Date.now() - lock_data.acquired_timestamp} ms`);
         // this.ongoing_requests -= 1;
         const request_time = Date.now() - lock_data.acquired_timestamp;
-        console.log(`Request completed in ${request_time} ms`);
+        if (this.trace_log) {
+            console.log(`Request completed in ${request_time} ms`);
+        }
         this.total_request_time_ms += request_time;
         this.request_times.push(request_time);
         this.ongoing_requests -= 1;
